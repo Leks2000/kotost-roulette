@@ -167,3 +167,15 @@ hook = "player_respawned"
 hook_version = 1
 helper = "hooks/respawned.rs"
 bindings = [{ name = "player", ty = "u128", value = "player" }]
+
+[[injection]]
+id = "release"
+kind = "HEAD"
+hook = "screen_mouse_button_released_pre"
+hook_version = 1
+helper = "hooks/release.rs"
+bindings = [
+  { name = "game", ty = "&crate::game::Game<'_>", value = "self" },
+  { name = "screen", ty = "&NativeScreenView<'_>", value = "screen" },
+  { name = "canceled", ty = "&mut bool", value = "&mut *canceled" },
+]

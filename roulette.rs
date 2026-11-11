@@ -615,26 +615,31 @@ pub fn tick(game: &mut Game<'_>) {
 // Client: the screen
 // ===================================================================================================
 
-const W: f32 = 256.0;
-const H: f32 = 234.0;
+const W: f32 = 302.0;
+const H: f32 = 250.0;
 const SLOT: f32 = 18.0;
-/// The wheel: its centre and radius in the panel.
-const WX: f32 = 66.0;
-const WY: f32 = 80.0;
-const WR: f32 = 54.0;
-/// The right column.
-const RX: f32 = 136.0;
-const BET: (f32, f32) = (RX + 4.0, 32.0);
-const REWARD: (f32, f32) = (RX + 72.0, 32.0);
-const MULT_Y: f32 = 70.0;
-const SPIN_BTN: [f32; 4] = [RX, 112.0, 112.0, 18.0];
+/// The top block: two item panels and the ring between them.
+const TOP_Y: f32 = 20.0;
+const TOP_H: f32 = 96.0;
+const PANEL_W: f32 = 90.0;
+const LEFT: [f32; 4] = [6.0, TOP_Y, PANEL_W, TOP_H];
+const RIGHT: [f32; 4] = [W - 6.0 - PANEL_W, TOP_Y, PANEL_W, TOP_H];
+/// The ring: its centre and radii.
+const WX: f32 = W / 2.0;
+const WY: f32 = TOP_Y + TOP_H / 2.0;
+const WR: f32 = 40.0;
+const WI: f32 = 30.0;
+/// The button row: the spin button, then x2 x4 x5 x8 x10 and 30 % 50 % 70 %.
+const SPIN_BTN: [f32; 4] = [6.0, 121.0, 84.0, 18.0];
+const CHANCES: [f64; 3] = [0.3, 0.5, 0.7];
+const NBTN: usize = 8;
 /// The inventory: three rows of the main inventory, then the hotbar.
 const INV_X: f32 = (W - 9.0 * SLOT) / 2.0;
-const INV_Y: f32 = 150.0;
+const INV_Y: f32 = 152.0;
 /// The search over the right side.
-const SEARCH: [f32; 4] = [RX - 6.0, 16.0, W - RX + 2.0, H - 20.0];
+const SEARCH: [f32; 4] = [146.0, 18.0, 150.0, 226.0];
 const ROW: f32 = 18.0;
-const ROWS: usize = 10;
+const ROWS: usize = 11;
 
 struct Spin {
     start: Instant,
@@ -657,10 +662,13 @@ struct Client {
     /// The staked slot (0..36), its item and how many of it.
     bet: Option<(usize, String, u32)>,
     target: Option<(String, u32)>,
-    mult: Option<u32>,
+    /// The button (x2.. or 30 %..) the reward was picked with; it is picked again for a new stake.
+    mode: Option<usize>,
     search: Option<(String, usize)>,
+    /// An inventory slot pressed and not yet let go (slot, mouse button): dropped on the stake panel it is staked.
+    drag: Option<(usize, i32)>,
     spin: Option<Spin>,
-    /// Where the wheel rests, in turns.
+    /// Where the needle rests, in turns.
     rot: f32,
     outcome: Option<(bool, String)>,
     hint: Option<(String, Instant)>,
@@ -694,8 +702,21 @@ fn slot_rect(i: usize) -> [f32; 4] {
     [INV_X + col as f32 * SLOT, y, SLOT, SLOT]
 }
 
-fn mult_rect(i: usize) -> [f32; 4] {
-    [RX + i as f32 * 23.0, MULT_Y, 21.0, 14.0]
+fn btn_rect(i: usize) -> [f32; 4] {
+    [96.0 + i as f32 * 25.0, 121.0, 23.0, 18.0]
+}
+
+/// The panel's item box, and its quantity widgets: minus, plus, the slider.
+fn item_box(p: [f32; 4]) -> [f32; 4] {
+    [p[0] + p[2] / 2.0 - 10.0, p[1] + 8.0, 20.0, 20.0]
+}
+
+fn qty_boxes(p: [f32; 4]) -> ([f32; 4], [f32; 4], [f32; 4]) {
+    (
+        [p[0] + 6.0, p[1] + 55.0, 14.0, 14.0],
+        [p[0] + p[2] - 20.0, p[1] + 55.0, 14.0, 14.0],
+        [p[0] + 8.0, p[1] + 76.0, p[2] - 16.0, 6.0],
+    )
 }
 
 fn inv<'a>(game: &'a Game<'_>, i: usize) -> Option<&'a ItemStack> {
@@ -745,13 +766,43 @@ impl Client {
         Some(self.target_value()? as f64 / self.bet_value(game)? as f64)
     }
 
-    /// x`n`: the table's item (and count) whose points come nearest the stake's times `n`; within 2 %, the
-    /// fewest of the dearest.
-    fn pick_mult(&mut self, game: &Game<'_>, n: u32) {
+    /// How many of the stake or the reward there can be at most.
+    fn max_of(&self, game: &Game<'_>, is_bet: bool) -> u32 {
+        if is_bet {
+            self.bet.as_ref().and_then(|(slot, id, _)| inv(game, *slot).filter(|s| *s.item == **id)).map_or(1, |s| s.count)
+        } else {
+            self.target.as_ref().map_or(1, |(id, _)| game.native_max_stack_size(id).unwrap_or(64).max(1) * 36)
+        }
+    }
+
+    fn qty_of(&self, is_bet: bool) -> Option<u32> {
+        if is_bet { self.bet.as_ref().map(|b| b.2) } else { self.target.as_ref().map(|t| t.1) }
+    }
+
+    fn set_qty(&mut self, game: &Game<'_>, is_bet: bool, n: i64) {
+        let n = n.clamp(1, i64::from(self.max_of(game, is_bet))) as u32;
+        if is_bet {
+            if let Some(b) = &mut self.bet {
+                b.2 = n;
+            }
+            self.repick(game);
+        } else {
+            if let Some(t) = &mut self.target {
+                t.1 = n;
+            }
+            self.mode = None;
+        }
+        self.outcome = None;
+    }
+
+    /// The button `m`'s reward: the table's item (and count) whose points come nearest the stake's times the
+    /// multiplier (x`n`, or the chance's `edge / p`); within 2 %, the fewest of the dearest.
+    fn pick_btn(&mut self, game: &Game<'_>, m: usize) {
         let Some(v) = self.bet_value(game) else {
             return self.hint(tr("Сначала поставь предмет из инвентаря", "Stake an item from your inventory first"));
         };
-        let want = v as f64 * f64::from(n);
+        let n = if m < MULTS.len() { f64::from(MULTS[m]) } else { self.table.edge / CHANCES[m - MULTS.len()] };
+        let want = v as f64 * n;
         let mut best: Option<(f64, u32, &Price)> = None;
         for p in &self.table.prices {
             let max = game.native_max_stack_size(&p.id).unwrap_or(64).max(1);
@@ -775,9 +826,16 @@ impl Client {
         match best.map(|(_, c, p)| (c, p.id.clone())) {
             Some((c, id)) => {
                 self.target = Some((id, c));
-                self.mult = Some(n);
+                self.mode = Some(m);
+                self.outcome = None;
             }
             None => self.hint(tr("Нет подходящей награды", "No fitting reward")),
+        }
+    }
+
+    fn repick(&mut self, game: &Game<'_>) {
+        if let Some(m) = self.mode {
+            self.pick_btn(game, m);
         }
     }
 
@@ -792,9 +850,7 @@ impl Client {
         let n = if one { 1 } else { s.count };
         self.bet = Some((slot, s.item.to_string(), n));
         self.outcome = None;
-        if let Some(n) = self.mult {
-            self.pick_mult(game, n);
-        }
+        self.repick(game);
     }
 
     fn ask(&mut self, game: &Game<'_>) {
@@ -843,12 +899,19 @@ impl Client {
             None => 1,
         };
         self.target = Some((p.id.clone(), c));
-        self.mult = None;
+        self.mode = None;
         self.search = None;
+        self.outcome = None;
     }
 }
 
 // --- drawing ---------------------------------------------------------------------------------------
+
+const PANEL_BG: u32 = 0xFF121823;
+const PANEL_EDGE: u32 = 0xFF3A4558;
+const CELL: u32 = 0xFF0C1018;
+const CELL_EDGE: u32 = 0xFF2A3342;
+const GOLD: u32 = 0xFFFFD54F;
 
 fn fill(game: &Game<'_>, b: &mut HudBatch, r: [f32; 4], argb: u32) {
     game.native_fill(b, r, argb);
@@ -868,6 +931,13 @@ fn centered(game: &Game<'_>, b: &mut HudBatch, s: &str, cx: f32, y: f32, rgb: u3
     text(game, b, s, (cx - w / 2.0).round(), y, rgb);
 }
 
+/// Text centred and scaled `k` times about its top-centre.
+fn big(game: &Game<'_>, b: &mut HudBatch, s: &str, cx: f32, y: f32, rgb: u32, k: f32) {
+    let start = b.vertices.len();
+    centered(game, b, s, cx, y, rgb);
+    b.scale_since(start, cx, y, k, k);
+}
+
 /// An item's icon and its count, as a slot shows them.
 fn icon(game: &Game<'_>, b: &mut HudBatch, id: &str, n: u32, x: f32, y: f32) {
     let _ = game.native_item(b, id, [x, y], 16.0);
@@ -878,54 +948,116 @@ fn icon(game: &Game<'_>, b: &mut HudBatch, id: &str, n: u32, x: f32, y: f32) {
     }
 }
 
-fn button(game: &Game<'_>, b: &mut HudBatch, r: [f32; 4], label: &str, hot: bool, on: bool, off: bool) {
-    let face = if off { 0xFF3A3A3A } else if on { 0xFF2E7D32 } else if hot { 0xFF6A6A6A } else { 0xFF4A4A4A };
-    frame(game, b, r, face, if on { 0xFFFFD54F } else { 0xFF101010 });
-    let rgb = if off { 0x888888 } else { 0xFFFFFF };
-    centered(game, b, label, r[0] + r[2] / 2.0, r[1] + (r[3] - 8.0) / 2.0, rgb);
+fn wrap(game: &Game<'_>, s: &str, w: f32) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    for word in s.split(' ') {
+        let t = if cur.is_empty() { word.to_owned() } else { format!("{cur} {word}") };
+        if cur.is_empty() || game.native_text_width(&t) <= w {
+            cur = t;
+        } else {
+            out.push(std::mem::replace(&mut cur, word.to_owned()));
+        }
+    }
+    if !cur.is_empty() {
+        out.push(cur);
+    }
+    out
 }
 
-fn wedge(game: &Game<'_>, b: &mut HudBatch, c: [f32; 2], r: f32, a0: f32, a1: f32, argb: u32) {
-    let p = |a: f32| [c[0] + r * a.sin(), c[1] - r * a.cos()];
-    game.native_quad(b, [c, p(a0), p((a0 + a1) / 2.0), p(a1)], argb);
+fn mix(a: u32, b: u32, t: f32) -> u32 {
+    let t = t.clamp(0.0, 1.0);
+    let ch = |s: u32| (a >> s & 0xFF, b >> s & 0xFF);
+    let m = |s: u32| {
+        let (x, y) = ch(s);
+        (x as f32 + (y as f32 - x as f32) * t).round() as u32
+    };
+    m(24) << 24 | m(16) << 16 | m(8) << 8 | m(0)
 }
 
-fn disc(game: &Game<'_>, b: &mut HudBatch, c: [f32; 2], r: f32, argb: u32) {
-    let n = 32;
-    for i in 0..n {
-        let a = std::f32::consts::TAU * i as f32 / n as f32;
-        wedge(game, b, c, r, a, a + std::f32::consts::TAU / n as f32, argb);
+/// A line of width `w` from `p0` to `p1`.
+fn bar(game: &Game<'_>, b: &mut HudBatch, p0: [f32; 2], p1: [f32; 2], w: f32, argb: u32) {
+    let d = [p1[0] - p0[0], p1[1] - p0[1]];
+    let l = (d[0] * d[0] + d[1] * d[1]).sqrt().max(1e-3);
+    let n = [-d[1] / l * w / 2.0, d[0] / l * w / 2.0];
+    game.native_quad(
+        b,
+        [[p0[0] + n[0], p0[1] + n[1]], [p1[0] + n[0], p1[1] + n[1]], [p1[0] - n[0], p1[1] - n[1]], [p0[0] - n[0], p0[1] - n[1]]],
+        argb,
+    );
+}
+
+/// A faint honeycomb over a panel, as a backdrop.
+fn hexes(game: &Game<'_>, b: &mut HudBatch, r: [f32; 4]) {
+    let s = 7.0f32;
+    let (dx, dy) = (1.5 * s, 1.732_050_8 * s);
+    let ok = |p: [f32; 2]| p[0] >= r[0] + 2.0 && p[0] <= r[0] + r[2] - 2.0 && p[1] >= r[1] + 2.0 && p[1] <= r[1] + r[3] - 2.0;
+    let cols = (r[2] / dx) as i32 + 2;
+    let rows = (r[3] / dy) as i32 + 2;
+    for i in 0..cols {
+        for j in 0..rows {
+            let cx = r[0] + i as f32 * dx;
+            let cy = r[1] + j as f32 * dy + if i % 2 == 1 { dy / 2.0 } else { 0.0 };
+            let v: Vec<[f32; 2]> = (0..6)
+                .map(|k| {
+                    let a = std::f32::consts::FRAC_PI_3 * k as f32;
+                    [cx + s * a.cos(), cy + s * a.sin()]
+                })
+                .collect();
+            for k in 0..6 {
+                if ok(v[k]) && ok(v[(k + 1) % 6]) {
+                    bar(game, b, v[k], v[(k + 1) % 6], 0.7, 0x2EA88A4A);
+                }
+            }
+        }
     }
 }
 
-/// The part [f0, f1) of the wheel turned by `rot`: pieces of at most 1/80 of a turn, cut at the stripes (1/20),
-/// the stripes of the two colours in turn.
-fn arc(game: &Game<'_>, b: &mut HudBatch, c: [f32; 2], rot: f32, [f0, f1]: [f32; 2], [light, dark]: [u32; 2]) {
+/// A piece of the ring about `c` between radii `r0` and `r1`, from turn `f0` to `f1` (clockwise from the top).
+fn piece(game: &Game<'_>, b: &mut HudBatch, c: [f32; 2], f: [f32; 2], r: [f32; 2], argb: u32) {
     use std::f32::consts::TAU;
-    let mut f = f0;
-    while f < f1 - 1e-6 {
-        let k = (f * 20.0 + 1e-4).floor();
-        let end = f1.min(f + 1.0 / 80.0).min((k + 1.0) / 20.0);
-        let col = if (k as i32) % 2 == 0 { light } else { dark };
-        wedge(game, b, c, WR, (f - rot) * TAU, (end - rot) * TAU, col);
-        f = end;
+    let p = |f: f32, r: f32| [c[0] + r * (f * TAU).sin(), c[1] - r * (f * TAU).cos()];
+    game.native_quad(b, [p(f[0], r[0]), p(f[0], r[1]), p(f[1], r[1]), p(f[1], r[0])], argb);
+}
+
+fn arc(game: &Game<'_>, b: &mut HudBatch, c: [f32; 2], f: [f32; 2], r: [f32; 2], colour: impl Fn(f32) -> u32) {
+    let step = 1.0 / 64.0;
+    let mut at = f[0];
+    while at < f[1] - 1e-5 {
+        let e = (at + step).min(f[1]);
+        piece(game, b, c, [at, e + 0.0015], r, colour(at));
+        at = e;
     }
 }
 
-/// The wheel turned by `rot` turns: green over [0, chance) of it, red over the rest, a stripe every 1/20.
-fn wheel(game: &Game<'_>, b: &mut HudBatch, c: [f32; 2], chance: f32, rot: f32) {
-    disc(game, b, c, WR + 4.0, 0xFF1A1208);
-    disc(game, b, c, WR + 2.5, 0xFFB8862B);
+/// The ring: a track, the winning arc (gold to orange) over `[0, chance)`, ticks, and the needle at `needle`.
+fn ring(game: &Game<'_>, b: &mut HudBatch, c: [f32; 2], chance: f32, needle: f32) {
+    use std::f32::consts::TAU;
+    arc(game, b, c, [0.0, 1.0], [WI - 1.5, WR + 1.5], |_| 0xFF0A0E15);
+    arc(game, b, c, [0.0, 1.0], [WI, WR], |_| 0xFF1F2733);
     let chance = chance.clamp(0.0, 1.0);
-    arc(game, b, c, rot, [0.0, chance], [0xFF43B649, 0xFF2F9638]);
-    arc(game, b, c, rot, [chance, 1.0], [0xFFC0393F, 0xFF962A30]);
-    // The hub with the chance in it.
-    disc(game, b, c, 17.0, 0xFF1A1208);
-    disc(game, b, c, 15.5, 0xFF2B2B2B);
-    // The pointer at the top: a gold wedge pointing down.
-    let (x, y) = (c[0], c[1] - WR);
-    game.native_quad(b, [[x - 7.0, y - 9.0], [x + 7.0, y - 9.0], [x, y + 7.0], [x, y + 7.0]], 0xFF1A1208);
-    game.native_quad(b, [[x - 5.0, y - 8.0], [x + 5.0, y - 8.0], [x, y + 4.5], [x, y + 4.5]], 0xFFFFD54F);
+    if chance > 0.0 {
+        arc(game, b, c, [0.0, chance], [WI, WR], |f| mix(0xFFFFD54F, 0xFFF28C1A, f / chance));
+    }
+    let spoke = |game: &Game<'_>, b: &mut HudBatch, f: f32, r0: f32, r1: f32, w: f32, argb: u32| {
+        let (s, co) = ((f * TAU).sin(), (f * TAU).cos());
+        bar(game, b, [c[0] + r0 * s, c[1] - r0 * co], [c[0] + r1 * s, c[1] - r1 * co], w, argb);
+    };
+    for k in 0..40 {
+        let major = k % 5 == 0;
+        spoke(game, b, k as f32 / 40.0, WR + 3.0, WR + if major { 9.0 } else { 6.0 }, 1.0, if major { 0xFF8A94A6 } else { 0xFF4A5568 });
+    }
+    spoke(game, b, needle, WI + 2.0, WR + 2.0, 1.6, 0xFFF4F4F4);
+    // The head: a gold wedge past the ring, its point toward the centre.
+    let (s, co) = ((needle * TAU).sin(), (needle * TAU).cos());
+    let at = |r: f32, side: f32| [c[0] + r * s + side * co, c[1] - r * co + side * s];
+    game.native_quad(b, [at(WR + 1.0, 0.0), at(WR + 9.0, -3.5), at(WR + 9.0, 3.5), at(WR + 1.0, 0.0)], GOLD);
+}
+
+fn button(game: &Game<'_>, b: &mut HudBatch, r: [f32; 4], label: &str, hot: bool, on: bool, off: bool, ink: u32) {
+    let face = if off { 0xFF161C28 } else if on { 0xFF2A3A52 } else if hot { 0xFF2E394B } else { 0xFF1E2636 };
+    frame(game, b, r, face, if on { GOLD } else { CELL_EDGE });
+    centered(game, b, label, r[0] + r[2] / 2.0, r[1] + (r[3] - 8.0) / 2.0, if off { 0x59627A } else { ink });
 }
 
 fn ease(t: f32) -> f32 {
@@ -941,6 +1073,59 @@ impl Spin {
     }
 }
 
+/// One item panel: the backdrop, its item box, and under it the value and quantity widgets (or a prompt).
+fn side(
+    game: &Game<'_>,
+    b: &mut HudBatch,
+    o: (f32, f32),
+    m: [f32; 2],
+    p: [f32; 4],
+    what: &Option<(String, u32)>,
+    max: u32,
+    table: &Table,
+    prompt: (&str, &str),
+    busy: bool,
+) {
+    let at = |r: [f32; 4]| [o.0 + r[0], o.1 + r[1], r[2], r[3]];
+    let pr = at(p);
+    frame(game, b, pr, 0xFF141B27, 0xFF2C3646);
+    hexes(game, b, pr);
+    let bx = at(item_box(p));
+    frame(game, b, bx, if inside(m, bx) && !busy { 0xFF1C2535 } else { CELL }, CELL_EDGE);
+    let cx = pr[0] + pr[2] / 2.0;
+    match what {
+        Some((id, n)) => {
+            icon(game, b, id, 1, bx[0] + 2.0, bx[1] + 2.0);
+            let v = table.price(id).map_or(0, |pc| pc.pts * u64::from(*n));
+            centered(game, b, &format!("{} {}", tr("Ценность:", "Value:"), points(v)), cx, pr[1] + 33.0, 0xE7E9EE);
+            centered(game, b, tr("Количество", "Amount"), cx, pr[1] + 44.0, 0xA7AFBF);
+            let (mi, pl, sl) = qty_boxes(p);
+            for (r, s) in [(mi, "−"), (pl, "+")] {
+                let r = at(r);
+                frame(game, b, r, if inside(m, r) && !busy { 0xFF2E394B } else { 0xFF1A2231 }, CELL_EDGE);
+                centered(game, b, s, r[0] + r[2] / 2.0, r[1] + 3.0, 0xFFFFFF);
+            }
+            centered(game, b, &n.to_string(), cx, pr[1] + 58.0, GOLD);
+            let sl = at(sl);
+            fill(game, b, sl, 0xFF1F2733);
+            let frac = if max > 1 { (*n as f32 - 1.0) / (max as f32 - 1.0) } else { 1.0 };
+            fill(game, b, [sl[0], sl[1], (sl[2] * frac).max(3.0), sl[3]], GOLD);
+        }
+        None => {
+            let mut y = pr[1] + 33.0;
+            for line in wrap(game, prompt.0, pr[2] - 8.0) {
+                centered(game, b, &line, cx, y, 0xE7E9EE);
+                y += 10.0;
+            }
+            y += 3.0;
+            for line in wrap(game, prompt.1, pr[2] - 8.0) {
+                centered(game, b, &line, cx, y, 0x6F7A90);
+                y += 10.0;
+            }
+        }
+    }
+}
+
 /// `native_screen_render_post`: the screen.
 pub fn render(game: &Game<'_>, b: &mut HudBatch, screen: &NativeScreenView<'_>) {
     if !mine(game, screen) {
@@ -953,125 +1138,121 @@ pub fn render(game: &Game<'_>, b: &mut HudBatch, screen: &NativeScreenView<'_>) 
     let at = |r: [f32; 4]| [ox + r[0], oy + r[1], r[2], r[3]];
     let hot = |r: [f32; 4]| inside(m, at(r));
     let busy = c.busy();
-    // The panel.
+    // The window.
     fill(game, b, [0.0, 0.0, b.width, b.height], 0x80000000);
-    frame(game, b, [ox, oy, W, H], 0xFF2A2320, 0xFF0C0A08);
-    fill(game, b, [ox + 2.0, oy + 2.0, W - 4.0, 12.0], 0xFF3B302A);
-    text(game, b, tr("Рулетка", "Roulette"), ox + 6.0, oy + 4.0, 0xFFD54F);
-    // The wheel.
-    let spinning = c.spin.as_ref();
-    let (chance, rot) = match spinning {
-        Some(s) => (s.chance, if s.over { s.to } else { s.rot() }),
-        None => (c.mult_now(game).map_or(0.5, |x| (c.table.edge / x).min(1.0) as f32), c.rot),
-    };
-    let wc = [ox + WX, oy + WY];
-    wheel(game, b, wc, chance, rot);
-    let shown = match (spinning, c.mult_now(game)) {
-        (Some(s), _) => percent(f64::from(s.chance)),
-        (None, Some(x)) => percent((c.table.edge / x).min(1.0)),
-        _ => "?".into(),
-    };
-    centered(game, b, &shown, wc[0], wc[1] - 4.0, 0xFFFFFF);
-    // The stake and the reward.
-    let stake = spinning.filter(|s| !s.over).map(|s| s.stake.clone()).or_else(|| {
+    frame(game, b, [ox, oy, W, H], PANEL_BG, PANEL_EDGE);
+    big(game, b, tr("РУЛЕТКА", "ROULETTE"), ox + W / 2.0, oy + 5.0, 0xFFFFFF, 1.7);
+    // The stake and the reward panels.
+    let spinning = c.spin.as_ref().filter(|s| !s.over);
+    let stake = spinning.map(|s| s.stake.clone()).or_else(|| {
         let (slot, id, n) = c.bet.as_ref()?;
         let s = inv(game, *slot).filter(|s| *s.item == **id)?;
         Some((id.clone(), (*n).min(s.count)))
     });
-    let reward = spinning.filter(|s| !s.over).map(|s| s.reward.clone()).or_else(|| c.target.clone());
-    for (is_bet, pos, what) in [(true, BET, &stake), (false, REWARD, &reward)] {
-        let label = if is_bet { tr("Ставка", "Stake") } else { tr("Награда", "Reward") };
-        let r = [pos.0, pos.1, 20.0, 20.0];
-        centered(game, b, label, ox + pos.0 + 10.0, oy + pos.1 - 11.0, 0xBBBBBB);
-        frame(game, b, at(r), if hot(r) && !busy { 0xFF5A5A5A } else { 0xFF373737 }, 0xFF0C0A08);
-        match what {
-            Some((id, n)) => {
-                icon(game, b, id, *n, ox + pos.0 + 2.0, oy + pos.1 + 2.0);
-                let v = c.table.price(id).map_or(0, |p| p.pts * u64::from(*n));
-                centered(game, b, &format!("{} {}", points(v), tr("очк.", "pts")), ox + pos.0 + 10.0, oy + pos.1 + 23.0, 0xFFE082);
-            }
-            None => {
-                let q = if is_bet { tr("из инв.", "inventory") } else { tr("поиск", "search") };
-                centered(game, b, "?", ox + pos.0 + 10.0, oy + pos.1 + 6.0, 0x777777);
-                centered(game, b, q, ox + pos.0 + 10.0, oy + pos.1 + 23.0, 0x777777);
-            }
-        }
+    let reward = spinning.map(|s| s.reward.clone()).or_else(|| c.target.clone());
+    let (bmax, tmax) = (c.max_of(game, true), c.max_of(game, false));
+    side(
+        game,
+        b,
+        (ox, oy),
+        m,
+        LEFT,
+        &stake,
+        bmax,
+        &c.table,
+        (tr("Выбери предмет для ставки", "Pick an item to stake"), tr("Перетащи из инвентаря", "Drag it from your inventory")),
+        busy,
+    );
+    side(
+        game,
+        b,
+        (ox, oy),
+        m,
+        RIGHT,
+        &reward,
+        tmax,
+        &c.table,
+        (tr("Выбери желаемый предмет", "Pick the item you want"), tr("Нажми, чтобы открыть каталог", "Click to open the catalog")),
+        busy,
+    );
+    // The ring, and in it the chance and what became of the spin.
+    let (chance, needle) = match c.spin.as_ref() {
+        Some(s) => (s.chance, if s.over { s.to.fract() } else { s.rot().fract() }),
+        None => (c.mult_now(game).map_or(0.0, |x| (c.table.edge / x).min(1.0) as f32), c.rot),
+    };
+    let wc = [ox + WX, oy + WY];
+    ring(game, b, wc, chance, needle);
+    let col = if chance >= 0.5 { 0x55FF55 } else if chance >= 0.25 { 0xFFFF55 } else if chance > 0.0 { 0xFF8855 } else { 0xFF5555 };
+    big(game, b, &percent(f64::from(chance)), wc[0], wc[1] - 13.0, col, 1.35);
+    match &c.outcome {
+        Some((true, _)) => big(game, b, tr("УСПЕХ!", "SUCCESS!"), wc[0], wc[1] + 5.0, 0x55FF55, 1.0),
+        Some((false, _)) => big(game, b, tr("ПРОВАЛ", "FAILED"), wc[0], wc[1] + 5.0, 0xFF5555, 1.0),
+        None => centered(game, b, tr("шанс", "chance"), wc[0], wc[1] + 5.0, 0x8A94A6),
     }
-    centered(game, b, "→", ox + (BET.0 + REWARD.0) / 2.0 + 10.0, oy + BET.1 + 6.0, 0xFFD54F);
-    // x2 .. x10.
-    for (i, n) in MULTS.into_iter().enumerate() {
-        let r = mult_rect(i);
-        button(game, b, at(r), &format!("x{n}"), hot(r), c.mult == Some(n), busy || c.bet.is_none());
-    }
-    // The multiplier and the chance.
-    if let Some(x) = c.mult_now(game) {
-        let p = (c.table.edge / x).min(1.0);
-        let col = if x < c.table.min_mult || x > c.table.max_mult {
-            0xFF5555
-        } else if p >= 0.4 {
-            0x55FF55
-        } else if p >= 0.15 {
-            0xFFFF55
-        } else {
-            0xFF8855
-        };
-        text(game, b, &format!("{} x{}", tr("Множитель:", "Multiplier:"), if ru() { format!("{x:.2}").replace('.', ",") } else { format!("{x:.2}") }), ox + RX, oy + 88.0, 0xDDDDDD);
-        text(game, b, &format!("{} {}", tr("Шанс:", "Chance:"), percent(p)), ox + RX, oy + 99.0, col);
-    }
+    // The buttons.
+    let ready = c.mult_now(game).is_some_and(|x| x >= c.table.min_mult && x <= c.table.max_mult) && !busy;
+    let sr = at(SPIN_BTN);
+    let sface = if !ready { 0xFF1B2230 } else if hot(SPIN_BTN) { 0xFFE0A82A } else { 0xFFC8941A };
+    frame(game, b, sr, sface, if ready { 0xFF6B4A0A } else { CELL_EDGE });
     let label = if c.waiting.is_some() { "..." } else if busy { tr("Крутится...", "Spinning...") } else { tr("Крутить", "Spin") };
-    let ready = c.mult_now(game).is_some_and(|x| x >= c.table.min_mult && x <= c.table.max_mult);
-    button(game, b, at(SPIN_BTN), label, hot(SPIN_BTN), false, busy || !ready);
-    // The line over the inventory: the outcome, a hint, or what is under the pointer.
-    let mut line: Option<(String, u32)> = None;
+    centered(game, b, label, sr[0] + sr[2] / 2.0, sr[1] + 5.0, if ready { 0xFFFFFF } else { 0x59627A });
+    for i in 0..NBTN {
+        let r = btn_rect(i);
+        let (label, ink) = if i < MULTS.len() {
+            (format!("x{}", MULTS[i]), 0xFFFFFF)
+        } else {
+            let p = CHANCES[i - MULTS.len()];
+            (format!("{}%", (p * 100.0) as u32), [0xFF5555, 0xFFFF55, 0x55FF55][i - MULTS.len()])
+        };
+        button(game, b, at(r), &label, hot(r), c.mode == Some(i), busy || c.bet.is_none(), ink);
+    }
+    // The inventory.
+    text(game, b, tr("Инвентарь", "Inventory"), ox + INV_X, oy + INV_Y - 11.0, 0xA7AFBF);
+    let mut under: Option<(String, u32)> = None;
     for i in 0..36 {
         let r = slot_rect(i);
         let staked = c.bet.as_ref().is_some_and(|(s, _, _)| *s == i);
-        let edge = if staked { 0xFFFFD54F } else { 0xFF0C0A08 };
-        frame(game, b, at(r), if hot(r) { 0xFF6B6B6B } else { 0xFF8B8B8B }, edge);
+        let dragged = c.drag.is_some_and(|(s, _)| s == i);
+        let face = if hot(r) { 0xFF2A3342 } else { CELL };
+        frame(game, b, at(r), face, if staked { GOLD } else { CELL_EDGE });
         if let Some(s) = inv(game, i) {
-            let _ = game.native_item_stack(b, s, [ox + r[0] + 1.0, oy + r[1] + 1.0], 16.0);
-            if s.count > 1 {
-                let n = s.count.to_string();
-                let w = game.native_text_width(&n);
-                text(game, b, &n, ox + r[0] + 18.0 - w, oy + r[1] + 10.0, 0xFFFFFF);
+            if !dragged {
+                let _ = game.native_item_stack(b, s, [ox + r[0] + 1.0, oy + r[1] + 1.0], 16.0);
+                if s.count > 1 {
+                    let n = s.count.to_string();
+                    let w = game.native_text_width(&n);
+                    text(game, b, &n, ox + r[0] + 18.0 - w, oy + r[1] + 10.0, 0xFFFFFF);
+                }
             }
-            if hot(r) && c.search.is_none() {
-                line = Some(match c.table.price(&s.item) {
+            if hot(r) && c.search.is_none() && c.drag.is_none() {
+                under = Some(match c.table.price(&s.item) {
                     Some(p) => (format!("{} — {} {}", p.shown(ru()), points(p.pts), tr("очк. за шт.", "pts each")), 0xFFE082),
                     None => (tr("Нет цены — нельзя поставить", "No price: can't be staked").into(), 0xFF7777),
                 });
             }
         }
     }
-    if line.is_none() {
-        line = match (&c.outcome, &c.hint) {
-            (_, Some((h, at))) if at.elapsed() < Duration::from_secs(4) => Some((h.clone(), 0xFF8855)),
-            (Some((true, s)), _) => Some((s.clone(), 0x55FF55)),
-            (Some((false, s)), _) => Some((s.clone(), 0xFF5555)),
-            _ if c.bet.is_none() => Some((tr("Нажми на предмет в инвентаре — это ставка (ПКМ — 1 шт.)", "Click an item in your inventory to stake it (right click: one)").into(), 0xAAAAAA)),
-            _ if c.target.is_none() => Some((tr("Выбери награду: x2…x10 или нажми на слот награды", "Pick a reward: x2…x10, or click the reward slot").into(), 0xAAAAAA)),
-            _ => None,
-        };
-    }
+    // The line under the inventory: what is under the pointer, a hint, the outcome, or what to do next.
+    let line = under.or(match (&c.outcome, &c.hint) {
+        (_, Some((h, at))) if at.elapsed() < Duration::from_secs(4) => Some((h.clone(), 0xFF8855)),
+        (Some((true, s)), _) => Some((s.clone(), 0x55FF55)),
+        (Some((false, s)), _) => Some((s.clone(), 0xFF5555)),
+        _ if c.bet.is_none() => Some((tr("Перетащи предмет из инвентаря на панель слева (ПКМ — 1 шт.)", "Drag an item onto the left panel (right drag: one)").into(), 0x8A94A6)),
+        _ if c.target.is_none() => Some((tr("Выбери награду: x2…x10, шанс или каталог справа", "Pick a reward: x2…x10, a chance, or the catalog").into(), 0x8A94A6)),
+        _ => None,
+    });
     if let Some((s, rgb)) = line {
-        centered(game, b, &s, ox + W / 2.0, oy + INV_Y - 10.0, rgb);
-    }
-    // The outcome, big, over the wheel.
-    if let Some((win, _)) = &c.outcome {
-        let (s, rgb) = if *win { (tr("ПОБЕДА!", "YOU WIN!"), 0x55FF55) } else { (tr("МИМО", "MISS"), 0xFF5555) };
-        let start = b.vertices.len();
-        centered(game, b, s, wc[0], wc[1] + 22.0, rgb);
-        b.scale_since(start, wc[0], wc[1] + 22.0, 1.5, 1.5);
+        centered(game, b, &s, ox + W / 2.0, oy + H - 14.0, rgb);
     }
     // The search.
     if let Some((q, scroll)) = &c.search {
         let r = at(SEARCH);
-        frame(game, b, r, 0xF0181410, 0xFFFFD54F);
-        frame(game, b, [r[0] + 3.0, r[1] + 3.0, r[2] - 6.0, 12.0], 0xFF000000, 0xFF777777);
+        frame(game, b, r, 0xF0101620, GOLD);
+        frame(game, b, [r[0] + 3.0, r[1] + 3.0, r[2] - 6.0, 12.0], 0xFF05070B, CELL_EDGE);
         let ms = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map_or(0, |d| d.as_millis());
         let caret = if (ms / 500) % 2 == 0 { "_" } else { "" };
         let shown = if q.is_empty() { format!("{}{caret}", tr("Поиск…", "Search…")) } else { format!("{q}{caret}") };
-        text(game, b, &shown, r[0] + 6.0, r[1] + 5.0, if q.is_empty() { 0x888888 } else { 0xFFFFFF });
+        text(game, b, &shown, r[0] + 6.0, r[1] + 5.0, if q.is_empty() { 0x6F7A90 } else { 0xFFFFFF });
         let list = c.matches(q);
         let v = c.bet_value(game);
         for (k, p) in list.iter().skip(*scroll).take(ROWS).enumerate() {
@@ -1079,22 +1260,49 @@ pub fn render(game: &Game<'_>, b: &mut HudBatch, screen: &NativeScreenView<'_>) 
             let row = [r[0] + 2.0, y, r[2] - 4.0, ROW];
             let dear = v.is_none_or(|v| p.pts as f64 * 64.0 * 36.0 >= v as f64 * c.table.min_mult);
             if inside(m, row) {
-                fill(game, b, row, 0x40FFFFFF);
+                fill(game, b, row, 0x30FFFFFF);
             }
             let _ = game.native_item(b, &p.id, [row[0] + 1.0, y + 1.0], 16.0);
             let mut name = p.shown(ru());
             while game.native_text_width(&name) > r[2] - 62.0 && name.chars().count() > 3 {
                 name.pop();
             }
-            text(game, b, &name, row[0] + 20.0, y + 5.0, if dear { 0xFFFFFF } else { 0x777777 });
+            text(game, b, &name, row[0] + 20.0, y + 5.0, if dear { 0xFFFFFF } else { 0x6F7A90 });
             let pts = points(p.pts);
             let w = game.native_text_width(&pts);
             text(game, b, &pts, row[0] + row[2] - w - 2.0, y + 5.0, 0xFFE082);
         }
         if list.is_empty() {
-            centered(game, b, tr("Ничего нет", "Nothing found"), r[0] + r[2] / 2.0, r[1] + 24.0, 0x888888);
+            centered(game, b, tr("Ничего нет", "Nothing found"), r[0] + r[2] / 2.0, r[1] + 24.0, 0x6F7A90);
         }
     }
+    // A stack being dragged, under the pointer.
+    if let Some((slot, _)) = c.drag {
+        if let Some(s) = inv(game, slot) {
+            let _ = game.native_item_stack(b, s, [m[0] - 8.0, m[1] - 8.0], 16.0);
+        }
+    }
+}
+
+fn qty_click(c: &mut Client, game: &Game<'_>, is_bet: bool, panel: [f32; 4], m: [f32; 2], button: i32) -> bool {
+    if c.qty_of(is_bet).is_none() {
+        return false;
+    }
+    let (mi, pl, sl) = qty_boxes(panel);
+    let step = if button == 1 { 10 } else { 1 };
+    let n = i64::from(c.qty_of(is_bet).unwrap_or(1));
+    if inside(m, mi) {
+        c.set_qty(game, is_bet, n - step);
+    } else if inside(m, pl) {
+        c.set_qty(game, is_bet, n + step);
+    } else if inside(m, [sl[0], sl[1] - 3.0, sl[2], sl[3] + 6.0]) {
+        let frac = ((m[0] - sl[0]) / sl[2]).clamp(0.0, 1.0);
+        let max = c.max_of(game, is_bet);
+        c.set_qty(game, is_bet, 1 + (frac * (max as f32 - 1.0)).round() as i64);
+    } else {
+        return false;
+    }
+    true
 }
 
 /// `native_screen_mouse_button_pressed_pre`.
@@ -1124,26 +1332,54 @@ pub fn press(game: &Game<'_>, screen: &NativeScreenView<'_>, button: i32, cancel
     if c.busy() {
         return;
     }
+    // An inventory slot is picked up; where it is let go decides (the release).
     if let Some(i) = (0..36).find(|&i| inside(m, slot_rect(i))) {
-        return c.stake(game, i, button == 1);
-    }
-    if inside(m, [BET.0, BET.1, 20.0, 20.0]) {
-        c.bet = None;
+        if inv(game, i).is_some() {
+            c.drag = Some((i, button));
+        }
         return;
     }
-    if inside(m, [REWARD.0, REWARD.1, 20.0, 20.0]) {
+    if inside(m, item_box(LEFT)) {
+        c.bet = None;
+        c.outcome = None;
+        return;
+    }
+    if qty_click(c, game, true, LEFT, m, button) || qty_click(c, game, false, RIGHT, m, button) {
+        return;
+    }
+    if inside(m, RIGHT) {
         c.search = Some((String::new(), 0));
         return;
     }
-    if let Some(i) = (0..MULTS.len()).find(|&i| inside(m, mult_rect(i))) {
-        return c.pick_mult(game, MULTS[i]);
+    if let Some(i) = (0..NBTN).find(|&i| inside(m, btn_rect(i))) {
+        return c.pick_btn(game, i);
     }
     if inside(m, SPIN_BTN) {
         c.ask(game);
     }
 }
 
-/// `native_screen_mouse_scrolled_pre`: the list scrolls; over the stake or the reward, their count changes.
+/// `native_screen_mouse_button_released_pre`: a stack let go over the stake panel (or on its own slot, a click)
+/// becomes the stake.
+pub fn release(game: &Game<'_>, screen: &NativeScreenView<'_>, canceled: &mut bool) {
+    if !mine(game, screen) {
+        return;
+    }
+    *canceled = true;
+    let Some((ox, oy)) = gui_origin(game) else { return };
+    let m = [screen.mouse[0] - ox, screen.mouse[1] - oy];
+    let mut guard = lock(&CLIENT);
+    let Some(c) = guard.as_mut() else { return };
+    let Some((slot, button)) = c.drag.take() else { return };
+    if c.busy() || c.search.is_some() {
+        return;
+    }
+    if inside(m, LEFT) || inside(m, slot_rect(slot)) {
+        c.stake(game, slot, button == 1);
+    }
+}
+
+/// `native_screen_mouse_scrolled_pre`: the list scrolls; over a panel, its amount changes.
 pub fn scroll(game: &Game<'_>, screen: &NativeScreenView<'_>, delta: [f64; 2], modifiers: u32, canceled: &mut bool) {
     if !mine(game, screen) {
         return;
@@ -1164,17 +1400,11 @@ pub fn scroll(game: &Game<'_>, screen: &NativeScreenView<'_>, delta: [f64; 2], m
     if c.busy() {
         return;
     }
-    if inside(m, [BET.0, BET.1, 20.0, 20.0]) {
-        if let Some((slot, id, n)) = c.bet.clone() {
-            let have = inv(game, slot).map_or(1, |s| s.count);
-            c.bet = Some((slot, id, (i64::from(n) + step * big).clamp(1, i64::from(have)) as u32));
-            c.mult = None;
-        }
-    } else if inside(m, [REWARD.0, REWARD.1, 20.0, 20.0]) {
-        if let Some((id, n)) = c.target.clone() {
-            let max = game.native_max_stack_size(&id).unwrap_or(64).max(1);
-            c.target = Some((id, (i64::from(n) + step * big).clamp(1, i64::from(max) * 36) as u32));
-            c.mult = None;
+    for (is_bet, panel) in [(true, LEFT), (false, RIGHT)] {
+        if inside(m, panel) {
+            if let Some(n) = c.qty_of(is_bet) {
+                c.set_qty(game, is_bet, i64::from(n) + step * big);
+            }
         }
     }
 }
