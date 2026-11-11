@@ -1,0 +1,169 @@
+# Kotost Roulette («Рулетка»): stake a stack of game items, spin a wheel, win a dearer item or lose the stake.
+# The roll is the server's (it takes the stake as it rolls); the client draws the screen and the wheel.
+# Prices: config/kotost_roulette.txt on the server (written with ~400 items when missing).
+# Native mod for Horizon nightly-2026-11-08-fdc87ae (docs/native-mods.md, horizon-mixins).
+[mod]
+id = "kotost_roulette"
+version = "0.1.0"
+priority = 100
+
+[compatibility]
+horizon_revision = "fdc87aecdbd116bf1e08adcd062fcbaea8c2e2ca"
+
+# Inside the game's `game` module (crate::game::kotost_roulette): it reaches inventories, mod screens, messages.
+[[module]]
+id = "runtime"
+file = "crates/horizon-client/src/game.rs"
+name = "kotost_roulette"
+source = "roulette.rs"
+visibility = "pub"
+
+# --- server: /roulette, the item, the spins ------------------------------------------------------------
+[[injection]]
+id = "commands"
+kind = "HEAD"
+hook = "register_commands"
+hook_version = 1
+helper = "hooks/commands.rs"
+bindings = [{ name = "commands", ty = "&mut Vec<NativeCommand>", value = "&mut *commands" }]
+
+[[injection]]
+id = "command"
+kind = "HEAD"
+hook = "perform_command"
+hook_version = 1
+helper = "hooks/command.rs"
+bindings = [
+  { name = "game", ty = "&mut crate::game::Game<'_>", value = "&mut *self" },
+  { name = "player", ty = "&NativeServerPlayer", value = "player" },
+  { name = "command", ty = "&str", value = "command" },
+  { name = "ran", ty = "&mut bool", value = "&mut *ran" },
+]
+
+[[injection]]
+id = "use-item"
+kind = "HEAD"
+hook = "use_item"
+hook_version = 1
+helper = "hooks/use_item.rs"
+bindings = [
+  { name = "game", ty = "&mut crate::game::Game<'_>", value = "&mut *self" },
+  { name = "stack", ty = "&ItemStack", value = "stack" },
+  { name = "claimed", ty = "&mut bool", value = "&mut *claimed" },
+]
+
+[[injection]]
+id = "net-from-client"
+kind = "HEAD"
+hook = "net_from_client"
+hook_version = 1
+helper = "hooks/net_client.rs"
+bindings = [
+  { name = "player", ty = "u128", value = "player" },
+  { name = "channel", ty = "&str", value = "channel" },
+  { name = "data", ty = "&[u8]", value = "data" },
+]
+
+# Both sides: the spins and rewards on a server, the wheel's clicks and stop in the window.
+[[injection]]
+id = "tick"
+kind = "HEAD"
+hook = "tick"
+hook_version = 1
+helper = "hooks/tick.rs"
+bindings = [{ name = "game", ty = "&mut crate::game::Game<'_>", value = "&mut *self" }]
+
+# --- client: the screen ------------------------------------------------------------------------------
+[[injection]]
+id = "net-from-server"
+kind = "HEAD"
+hook = "net_from_server"
+hook_version = 1
+helper = "hooks/net_server.rs"
+bindings = [
+  { name = "game", ty = "&mut crate::game::Game<'_>", value = "&mut *self" },
+  { name = "channel", ty = "&str", value = "channel" },
+  { name = "data", ty = "&[u8]", value = "data" },
+]
+
+[[injection]]
+id = "render"
+kind = "HEAD"
+hook = "screen_render_post"
+hook_version = 1
+helper = "hooks/render.rs"
+bindings = [
+  { name = "game", ty = "&crate::game::Game<'_>", value = "self" },
+  { name = "batch", ty = "&mut HudBatch", value = "&mut *batch" },
+  { name = "screen", ty = "&NativeScreenView<'_>", value = "screen" },
+]
+
+[[injection]]
+id = "press"
+kind = "HEAD"
+hook = "screen_mouse_button_pressed_pre"
+hook_version = 1
+helper = "hooks/press.rs"
+bindings = [
+  { name = "game", ty = "&crate::game::Game<'_>", value = "self" },
+  { name = "screen", ty = "&NativeScreenView<'_>", value = "screen" },
+  { name = "button", ty = "i32", value = "button" },
+  { name = "canceled", ty = "&mut bool", value = "&mut *canceled" },
+]
+
+[[injection]]
+id = "scroll"
+kind = "HEAD"
+hook = "screen_mouse_scrolled_pre"
+hook_version = 1
+helper = "hooks/scroll.rs"
+bindings = [
+  { name = "game", ty = "&crate::game::Game<'_>", value = "self" },
+  { name = "screen", ty = "&NativeScreenView<'_>", value = "screen" },
+  { name = "scroll", ty = "[f64; 2]", value = "scroll" },
+  { name = "modifiers", ty = "u32", value = "modifiers" },
+  { name = "canceled", ty = "&mut bool", value = "&mut *canceled" },
+]
+
+[[injection]]
+id = "key"
+kind = "HEAD"
+hook = "screen_key_pressed_pre"
+hook_version = 1
+helper = "hooks/key.rs"
+bindings = [
+  { name = "game", ty = "&crate::game::Game<'_>", value = "self" },
+  { name = "screen", ty = "&NativeScreenView<'_>", value = "screen" },
+  { name = "key", ty = "&str", value = "key" },
+  { name = "canceled", ty = "&mut bool", value = "&mut *canceled" },
+]
+
+[[injection]]
+id = "typed"
+kind = "HEAD"
+hook = "screen_char_typed_pre"
+hook_version = 1
+helper = "hooks/typed.rs"
+bindings = [
+  { name = "game", ty = "&crate::game::Game<'_>", value = "self" },
+  { name = "screen", ty = "&NativeScreenView<'_>", value = "screen" },
+  { name = "c", ty = "char", value = "c" },
+  { name = "canceled", ty = "&mut bool", value = "&mut *canceled" },
+]
+
+# --- server: one «Рулетка» for everyone who joins or respawns without one ------------------------------
+[[injection]]
+id = "joined"
+kind = "HEAD"
+hook = "player_logged_in"
+hook_version = 1
+helper = "hooks/joined.rs"
+bindings = [{ name = "player", ty = "u128", value = "player" }]
+
+[[injection]]
+id = "respawned"
+kind = "HEAD"
+hook = "player_respawned"
+hook_version = 1
+helper = "hooks/respawned.rs"
+bindings = [{ name = "player", ty = "u128", value = "player" }]
