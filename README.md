@@ -59,6 +59,8 @@ for), `tick` (the server rolls and gives rewards; the client plays the wheel's c
 `net_from_server`, `screen_render_post`, `screen_mouse_button_pressed_pre`, `screen_mouse_scrolled_pre`,
 `screen_key_pressed_pre`, `screen_char_typed_pre` (the mod's own screen, `native_mod_screen_open`).
 
+![The Roulette screen](docs/screenshot1.png) ![Win](docs/screenshot3.png)
+
 Built for Horizon `fdc87ae` (Nightly 2026-11-08); the launcher pins that commit when it builds the mod.
 
 ## License
