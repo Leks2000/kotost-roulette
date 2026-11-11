@@ -698,7 +698,7 @@ fn mult_rect(i: usize) -> [f32; 4] {
     [RX + i as f32 * 23.0, MULT_Y, 21.0, 14.0]
 }
 
-fn inv(game: &Game<'_>, i: usize) -> Option<&ItemStack> {
+fn inv<'a>(game: &'a Game<'_>, i: usize) -> Option<&'a ItemStack> {
     game.inventory.get(i).and_then(Option::as_ref).filter(|s| s.count > 0 && &*s.item != "minecraft:air")
 }
 
